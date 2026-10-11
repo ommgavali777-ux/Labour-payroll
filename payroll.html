@@ -1,0 +1,88 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payroll</title>
+<script src="https://cdn.tailwindcss.com"></script><style>@media print { aside, .noprint { display: none !important } body { background: #fff !important; color: #000 !important } }</style></head>
+<body class="bg-[#0f172a] text-slate-300"><div id="app"></div>
+<script type="module">
+import { db } from "./js/firebase-config.js";
+import { requireAuth } from "./js/auth.js";
+import { list, nextId, audit, updateRow, toast, money, today } from "./js/utils.js";
+import { dataTable, form, showModal, esc } from "./js/ui.js";
+import { doc, setDoc } from "https://www.gstatic.com/firebasejs/12.0.0/firebase-firestore.js";
+const r2 = n => Math.round(n * 100) / 100;
+const badge = v => `<span class="px-2 py-0.5 rounded text-xs text-white ${{ OPEN: "bg-amber-500", PENDING: "bg-amber-500", DRAFT: "bg-amber-500", APPROVED: "bg-indigo-600", DEDUCTED: "bg-green-600", PAID: "bg-green-600", REJECTED: "bg-red-600" }[v] || "bg-slate-600"}">${v}</span>`;
+const sel = "bg-slate-900 border border-slate-600 rounded-lg p-2";
+
+requireAuth("payroll", ({ role, content }) => {
+  const S = { month: today().slice(0, 7), site: "", trade: "" };
+  const load = async () => {
+    const [labs, sites, trades, codes, logs, cards, extra, adv, pay] = await Promise.all(
+      ["labours", "sites", "trades", "hajiriCodes", "dailyHajiriLogs", "attendanceCards", "extraWorkLogs", "advanceLedger", "monthlyPayrollSummary"].map(list));
+    const tn = id => trades.find(t => t.tradeId === id)?.tradeName || "-";
+    content.innerHTML = `<div class="bg-[#1e293b] border border-slate-700 rounded-xl shadow p-4"><h1 class="text-lg font-semibold text-white mb-3">Monthly Payroll</h1>
+      <div class="noprint flex flex-wrap gap-2 mb-3"><input id="pm" type="month" class="${sel}">
+      <select id="ps" class="${sel}"><option value="">All sites</option>${sites.map(s => `<option value="${s.siteId}">${esc(s.siteName)}</option>`)}</select>
+      <select id="pt" class="${sel}"><option value="">All trades</option>${trades.map(t => `<option value="${t.tradeId}">${esc(t.tradeName)}</option>`)}</select>
+      <button id="gen" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg">Generate Payroll</button>
+      <button id="pr" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg">Print</button></div>
+      <div id="sum" class="text-sm text-slate-400 mb-2"></div><div id="t"></div></div>`;
+
+    // All payroll figures come from the month's logs (formulas of section 3.2)
+    const compute = l => {
+      const mine = cards.filter(c => c.labourId === l.labourId).map(c => c.cardId), ml = logs.filter(g => mine.includes(g.cardId) && g.logDate.startsWith(S.month)); if (!ml.length) return null;
+      let hours = 0, wages = 0; ml.forEach(g => { const h = codes.find(c => c.hajiriCode === g.hajiriCode)?.hoursWorked || 0; hours += h; wages += h * g.appliedDailyRate / 8; });
+      const ex = extra.filter(e => e.labourId === l.labourId && e.status === "APPROVED" && e.workDate.startsWith(S.month)).reduce((a, e) => a + (e.approvedAmount || 0), 0);
+      const ad = adv.filter(a => a.labourId === l.labourId && ((a.settlementStatus === "DEDUCTED" && a.deductedInMonth === S.month) || (a.settlementStatus === "OPEN" && a.dateGiven <= S.month + "-31"))).reduce((a, x) => a + x.advanceAmount, 0);
+      return { totalHours: hours, totalUnits: hours / 2, dayWages: r2(wages), extraWorkAmount: r2(ex), advanceDeducted: r2(ad) };
+    };
+    const net = r => r2(r.dayWages + r.extraWorkAmount - r.advanceDeducted - r.otherDeductions + r.allowances);
+
+    gen.onclick = async () => {
+      gen.disabled = true; gen.textContent = "Generating..."; let n = 0;
+      try { for (const l of labs.filter(l => (!S.site || l.currentSiteId == S.site) && (!S.trade || l.tradeId == S.trade))) {
+        const c = compute(l); if (!c) continue; const old = pay.find(p => p.labourId === l.labourId && p.monthYear === S.month); if (old && old.status !== "DRAFT") continue;   // locked once approved
+        const row = { payrollId: old ? old.payrollId : await nextId("monthlyPayrollSummary"), labourId: l.labourId, monthYear: S.month, ...c, otherDeductions: old?.otherDeductions || 0, allowances: old?.allowances || 0, status: "DRAFT", generatedOn: new Date().toISOString() };
+        row.grossWages = r2(row.dayWages + row.extraWorkAmount); row.netPayable = net(row);
+        await setDoc(doc(db, "monthlyPayrollSummary", l.labourId + "_" + S.month), row);   // one payroll per labour per month
+        await audit("monthlyPayrollSummary", l.labourId + "_" + S.month, old ? "UPDATE" : "INSERT", old ? { netPayable: old.netPayable } : null, { netPayable: row.netPayable, status: "DRAFT" }); n++; }
+        toast(n ? n + " payroll record(s) generated." : "No attendance found for the selected month.", n > 0); } catch (e) { toast(e.message, false); }
+      load(); };
+    pr.onclick = () => print();
+
+    const details = p => { const l = labs.find(x => x.labourId === p.labourId) || {}, mine = cards.filter(c => c.labourId === p.labourId).map(c => c.cardId);
+      const ml = logs.filter(g => mine.includes(g.cardId) && g.logDate.startsWith(p.monthYear)).sort((a, b) => a.logDate.localeCompare(b.logDate));
+      const ex = extra.filter(e => e.labourId === p.labourId && e.workDate.startsWith(p.monthYear)), ad = adv.filter(a => a.labourId === p.labourId);
+      const t = (head, rows) => `<table class="w-full mb-3"><tr class="text-left text-slate-400">${head.map(h => `<th>${h}</th>`).join("")}</tr>${rows.map(r => `<tr class="border-t border-slate-700">${r.map(c => `<td class="py-1">${c}</td>`).join("")}</tr>`).join("") || `<tr><td class="py-1 text-slate-500">None</td></tr>`}</table>`;
+      showModal(`${l.fullName} - ${p.monthYear}`, `<div class="mb-2">Trade: ${esc(tn(l.tradeId))} | Aadhar: ${esc(l.aadharNo)} | Bank A/C: ${esc(l.bankAccNo || "-")} | IFSC: ${esc(l.ifscCode || "-")}</div>
+        <b class="text-white">Attendance</b>${t(["Date", "Code", "Units", "Rate", "Amount"], ml.map(g => { const h = codes.find(c => c.hajiriCode === g.hajiriCode)?.hoursWorked || 0; return [g.logDate, esc(g.hajiriCode), h / 2, money(g.appliedDailyRate), money(h * g.appliedDailyRate / 8)]; }))}
+        <b class="text-white">Extra work</b>${t(["Date", "Description", "Hrs", "Amount", "Status"], ex.map(e => [e.workDate, esc(e.jobDescription), e.hours, e.approvedAmount == null ? "-" : money(e.approvedAmount), badge(e.status)]))}
+        <b class="text-white">Advances</b>${t(["Date", "Amount", "Status"], ad.map(a => [a.dateGiven, money(a.advanceAmount), badge(a.settlementStatus)]))}
+        <div class="border-t border-slate-600 pt-2 space-y-1"><div>Day wages: ${money(p.dayWages)}</div><div>+ Extra work: ${money(p.extraWorkAmount)}</div><div>= Gross wages: ${money(p.grossWages)}</div>
+        <div>- Advances: ${money(p.advanceDeducted)}</div><div>- Other deductions: ${money(p.otherDeductions)}</div><div>+ Allowances: ${money(p.allowances)}</div><div class="text-white font-bold text-base">= Net payable: ${money(p.netPayable)}</div></div>`); };
+
+    const table = () => {
+      const rows = pay.filter(p => p.monthYear === S.month).map(p => { const l = labs.find(x => x.labourId === p.labourId) || {}; return { ...p, name: l.fullName || "-", trade: tn(l.tradeId), site: l.currentSiteId, tradeId: l.tradeId, l }; })
+        .filter(r => (!S.site || r.site == S.site) && (!S.trade || r.tradeId == S.trade));
+      sum.textContent = `${rows.length} workers | Total net payable: ${money(rows.reduce((a, r) => a + r.netPayable, 0))}`;
+      dataTable(document.getElementById("t"), { file: "payroll-" + S.month + ".csv", rows,
+        cols: [["name", "Labour"], ["trade", "Trade"], ["totalUnits", "Units"], ["grossWages", "Gross Wages", v => money(v)], ["extraWorkAmount", "Extra Work", v => money(v)], ["advanceDeducted", "Advances", v => money(v)],
+          ["otherDeductions", "Other Ded.", v => money(v)], ["allowances", "Allowances", v => money(v)], ["netPayable", "Net Payable", v => "<b>" + money(v) + "</b>"], ["status", "Status", badge]],
+        actions: [["Details", details],
+          ["Edit", p => { if (p.status !== "DRAFT") return toast("Only DRAFT payroll can be edited.", false);
+            form("Allowances & other deductions", [["allowances", "Allowances - shoes, lunch (₹)", "number", 'min="0" step="0.01"'], ["otherDeductions", "Other deductions (₹)", "number", 'min="0" step="0.01"']], p, async d => {
+              const patch = { allowances: r2(+d.allowances || 0), otherDeductions: r2(+d.otherDeductions || 0) }; if (patch.allowances < 0 || patch.otherDeductions < 0) throw new Error("Values cannot be negative.");
+              patch.netPayable = net({ ...p, ...patch }); await updateRow("monthlyPayrollSummary", p._id, patch, { allowances: p.allowances, otherDeductions: p.otherDeductions, netPayable: p.netPayable }); toast("Payroll updated."); load(); }); }],
+          ["Approve", async p => { if (p.status !== "DRAFT") return toast("Only DRAFT payroll can be approved.", false);
+            const c = compute(p.l); if (!c || c.advanceDeducted !== p.advanceDeducted || c.dayWages !== p.dayWages || c.extraWorkAmount !== p.extraWorkAmount) return toast("Data changed since generation. Click Generate Payroll again.", false);
+            if (!confirm("Approve payroll for " + p.name + "? Open advances will be marked as deducted.")) return;
+            // transaction-like workflow: settle advances, then approve the payroll row
+            for (const a of adv.filter(a => a.labourId === p.labourId && a.settlementStatus === "OPEN" && a.dateGiven <= S.month + "-31"))
+              await updateRow("advanceLedger", a.advanceId, { settlementStatus: "DEDUCTED", deductedInMonth: S.month }, { settlementStatus: "OPEN", deductedInMonth: null });
+            await updateRow("monthlyPayrollSummary", p._id, { status: "APPROVED" }, { status: "DRAFT" }); toast("Payroll approved."); load(); }],
+          ["Mark Paid", async p => { if (p.status !== "APPROVED") return toast("Approve the payroll before marking it paid.", false); if (!confirm("Mark " + money(p.netPayable) + " as paid to " + p.name + "?")) return;
+            await updateRow("monthlyPayrollSummary", p._id, { status: "PAID", paidOn: today() }, { status: "APPROVED" }); toast("Payroll marked as paid."); load(); }]] });
+    };
+    pm.value = S.month; ps.value = S.site; pt.value = S.trade;
+    pm.onchange = e => { S.month = e.target.value || S.month; table(); }; ps.onchange = e => { S.site = e.target.value; table(); }; pt.onchange = e => { S.trade = e.target.value; table(); }; table();
+  };
+  load();
+});
+</script></body></html>

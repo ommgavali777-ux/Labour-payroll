@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore { match /databases/{d}/documents {
+  function signed() { return request.auth != null; }
+  function role() { return get(/databases/$(d)/documents/users/$(request.auth.uid)).data.role.upper(); }
+  function isAdmin() { return signed() && role() == 'ADMIN'; }
+  function isSup() { return signed() && role() in ['ADMIN','SUPERVISOR']; }
+  function isFin() { return signed() && role() in ['ADMIN','FINANCE']; }
+
+  match /users/{u} { allow read: if signed() && (request.auth.uid == u || isAdmin()); allow write: if isAdmin(); }
+  match /counters/{c} { allow read, write: if signed(); }
+  match /{m}/{id} {   // master tables: everyone reads, only ADMIN writes
+    allow read: if signed() && m in ['sites','trades','hajiriCodes','tradeRateMaster','labours','labourRateMaster','supervisors'];
+    allow write: if isAdmin() && m in ['sites','trades','hajiriCodes','tradeRateMaster','labours','labourRateMaster','supervisors'];
+  }
+  match /attendanceCards/{id} { allow read: if signed(); allow create, update: if isSup(); allow delete: if isAdmin(); }
+  match /dailyHajiriLogs/{id} { allow read: if signed(); allow create, update: if isSup(); allow delete: if isAdmin(); }
+  match /advanceLedger/{id} { allow read: if signed(); allow create: if isSup(); allow update: if isFin(); allow delete: if isAdmin(); }
+  match /extraWorkLogs/{id} { allow read: if signed(); allow create: if isSup(); allow update: if isFin(); allow delete: if isAdmin(); }
+  match /monthlyPayrollSummary/{id} { allow read: if signed(); allow create: if isFin(); allow update: if isFin() && resource.data.status != 'PAID'; allow delete: if isAdmin(); }
+  match /systemAuditLogs/{id} { allow read: if isFin(); allow create: if signed(); allow update, delete: if false; }
+}}

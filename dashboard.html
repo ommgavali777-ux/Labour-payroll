@@ -1,0 +1,20 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-[#0f172a] text-slate-300"><div id="app"></div>
+<script type="module">
+import { requireAuth } from "./js/auth.js";
+import { list, toast } from "./js/utils.js";
+import { seedMasters, resetMasters } from "./js/seed.js";
+requireAuth("dashboard", async ({ role, profile, content }) => {
+  const draw = async () => {
+    const [sites, trades, labours, logs] = await Promise.all(["sites", "trades", "labours", "dailyHajiriLogs"].map(list));
+    const k = [["Sites", sites.length], ["Trades", trades.length], ["Labour", labours.length], ["Hajiri Entries", logs.length]];
+    content.innerHTML = `<h1 class="text-xl text-white font-semibold mb-4">Welcome, ${profile.fullName || ""} <span class="text-sm text-slate-400">(${role})</span></h1>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">${k.map(([a, b]) => `<div class="bg-[#1e293b] border border-slate-700 rounded-xl p-4"><div class="text-xs text-slate-400">${a}</div><div class="text-2xl text-white font-bold">${b}</div></div>`).join("")}</div>
+      ${role === "ADMIN" && !trades.length ? `<button id="seed" class="mt-5 bg-indigo-600 text-white px-4 py-2 rounded-lg">Load master data (trades, Hajiri codes, sites)</button>` : ""}
+      ${role === "ADMIN" && trades.length && !labours.length ? `<button id="reset" class="mt-5 bg-red-600 text-white px-4 py-2 rounded-lg">Reset master data</button>` : ""}`;
+    document.getElementById("reset")?.addEventListener("click", async e => { if (!confirm("Delete all sites, trades, rates and Hajiri codes?")) return; e.target.disabled = true; e.target.textContent = "Resetting..."; try { await resetMasters(); toast("Master data reset."); } catch (er) { toast(er.message, false); } draw(); });
+    document.getElementById("seed")?.addEventListener("click", async e => { e.target.disabled = true; e.target.textContent = "Loading... please wait"; try { await seedMasters(); toast("Master data loaded."); draw(); } catch (e) { toast(e.message, false); draw(); } });
+  }; draw();
+});
+</script></body></html>
